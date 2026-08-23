@@ -352,6 +352,21 @@ function buildApi(
       await git.cherryPick(cwd, requireString(payload, 'hash'))
       return { ok: true }
     },
+    'git.push': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      await git.push(cwd)
+      return { ok: true }
+    },
+    'git.pull': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      await git.pull(cwd)
+      return { ok: true }
+    },
+    'git.fetch': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      await git.fetch(cwd)
+      return { ok: true }
+    },
     'git.show': async (payload) => {
       const { cwd } = cwdOf(payload)
       const path = await resolveGitPath(cwd, requireString(payload, 'path'))

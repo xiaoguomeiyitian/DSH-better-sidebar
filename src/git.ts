@@ -23,6 +23,8 @@ export interface GitStatusResult {
   isRepo: boolean
   branch?: string
   entries: GitStatusEntry[]
+  /** Ahead/behind counts vs upstream; null when no upstream is configured. */
+  aheadBehind?: { ahead: number; behind: number } | null
 }
 
 /** One `git log` row. */
@@ -155,11 +157,12 @@ export async function currentBranch(cwd: string): Promise<string> {
 export async function status(cwd: string): Promise<GitStatusResult> {
   const repo = await isGitRepo(cwd)
   if (!repo) return { isRepo: false, entries: [] }
-  const [branch, raw] = await Promise.all([
+  const [branch, raw, ab] = await Promise.all([
     currentBranch(cwd).catch(() => 'HEAD'),
     runGit(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+    aheadBehind(cwd).catch(() => null),
   ])
-  return { isRepo: true, branch, entries: parsePorcelainZ(raw) }
+  return { isRepo: true, branch, entries: parsePorcelainZ(raw), aheadBehind: ab }
 }
 
 /** Diff text of the worktree (unstaged) or the index (staged). */
@@ -241,4 +244,48 @@ export async function revert(cwd: string, hash: string): Promise<void> {
 /** Cherry-pick one commit onto the current branch. */
 export async function cherryPick(cwd: string, hash: string): Promise<void> {
   await runGit(cwd, ['cherry-pick', hash])
+}
+
+/** Push the current branch to its upstream (or origin with -u when none). */
+export async function push(cwd: string): Promise<void> {
+  try {
+    await runGit(cwd, ['push'], 60_000)
+  } catch (error) {
+    // No upstream configured: set it up with `git push -u origin <branch>`.
+    if (error instanceof GitCommandError && /no upstream|has no upstream/i.test(error.message)) {
+      const branch = await currentBranch(cwd).catch(() => 'HEAD')
+      await runGit(cwd, ['push', '-u', 'origin', branch], 60_000)
+      return
+    }
+    throw error
+  }
+}
+
+/** Pull the current branch from its upstream (fetch + merge). */
+export async function pull(cwd: string): Promise<void> {
+  await runGit(cwd, ['pull'], 60_000)
+}
+
+/** Fetch from the default remote without merging. */
+export async function fetch(cwd: string): Promise<void> {
+  await runGit(cwd, ['fetch'], 60_000)
+}
+
+/**
+ * Ahead/behind counts for the current branch vs its upstream. Returns null
+ * when the branch has no upstream (no tracking ref). Uses
+ * `git rev-list --left-right --count <upstream>...HEAD`.
+ */
+export async function aheadBehind(cwd: string): Promise<{ ahead: number; behind: number } | null> {
+  try {
+    // `@{upstream}` resolves to the tracking ref; errors when none exists.
+    const raw = await runGit(cwd, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'])
+    const [behindStr, aheadStr] = raw.trim().split(/\s+/)
+    const ahead = Number(aheadStr ?? '0')
+    const behind = Number(behindStr ?? '0')
+    if (Number.isNaN(ahead) || Number.isNaN(behind)) return { ahead: 0, behind: 0 }
+    return { ahead, behind }
+  } catch {
+    return null
+  }
 }

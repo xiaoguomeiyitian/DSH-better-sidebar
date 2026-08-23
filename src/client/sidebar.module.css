@@ -248,10 +248,10 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   background: var(--dsw-alias-interactive-bg-hover-accent);
 }
 
-/* The bottom panel's close control: the app's icon-button pattern (28px
-   circle), pinned to the tab strip's right end — one tap collapses the
-   panel. The tab strips below reserve its width so the + menu never hides
-   under it. */
+/* The bottom panel's close control: code-server's icon-button pattern
+   (22x22, 16px glyph, padding 3px, 6px radius), pinned to the tab strip's
+   right end — one tap collapses the panel. The tab strips below reserve
+   its width so the + menu never hides under it. */
 .bottomClose {
   position: absolute;
   top: 3px;
@@ -260,11 +260,11 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
   border: none;
-  border-radius: 50%;
+  border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
@@ -1965,6 +1965,49 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   overflow-x: hidden;
 }
 
+/* ── Commit area (code-server style: at the TOP, before file lists) ────── */
+.gitCommitArea {
+  flex: none;
+  padding: 8px 12px 4px;
+}
+
+.gitCommitInputRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.gitCommitButtonRow {
+  display: flex;
+  align-items: stretch;
+  height: 26px;
+}
+
+.gitCommitButton {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: none;
+  border-radius: 4px;
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  font: var(--dsw-font-xxs-strong-12);
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.gitCommitButton:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover);
+}
+
+.gitCommitButton:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .gitHeader {
   flex: none;
   display: flex;
@@ -1972,6 +2015,7 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   gap: 8px;
   height: 36px;
   padding: 0 8px 0 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
 }
 
 .gitBranchSelect {
@@ -1990,14 +2034,161 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   border-top: 1px solid var(--dsw-alias-border-l1);
 }
 
+/* History section: pinned to the bottom of the scrollable git panel so the
+   staged/changes area above gets the room. margin-top:auto pushes it down
+   in the flex column; when expanded the content scrolls within the panel. */
+.gitSectionHistory {
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  margin-top: auto;
+}
+
+/* Ahead/behind status indicator (between the history header and the tree). */
+.gitAheadBehind {
+  padding: 2px 12px 2px 28px;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The history header's inline branch selector + sync toolbar. */
+.gitSectionHistory .gitBranchSelect {
+  height: 20px;
+  min-width: 80px;
+  padding: 0 4px;
+  font: var(--dsw-font-xxxs-11);
+}
+
+/* ── Collapsible section header (code-server style: twistie + title + count + actions) ── */
 .gitSectionHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px 4px;
-  font: var(--dsw-font-xxxs-strong-11);
-  color: var(--dsw-alias-label-tertiary);
-  text-transform: uppercase;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px 0 0;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.gitSectionHeader:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.gitTwistie {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 22px;
+  padding-left: 8px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.gitSectionTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.gitCountBadge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 11px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.gitSectionActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 100ms;
+}
+
+.gitSectionHeader:hover .gitSectionActions {
+  opacity: 1;
+}
+
+.gitSectionAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.gitSectionAction:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-active);
+  color: var(--dsw-alias-label-primary);
+}
+
+.gitSectionAction:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Directory row in the staged/changes tree ─────────────────────────── */
+.gitDirRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  padding: 0 8px 0 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.gitDirRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.gitDirRow:hover .gitRowActions {
+  opacity: 1;
+}
+
+.gitDirRow:hover .gitRowActions {
+  opacity: 1;
+}
+
+.gitDirTwistie {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 22px;
+  padding-left: 8px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.gitDirName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-primary);
 }
 
 .gitLink {
@@ -2018,14 +2209,13 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   cursor: default;
 }
 
+/* ── File row (code-server style: 22px, hover-revealed actions) ──────── */
 .gitRow {
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  margin: 0 6px;
-  padding: 0 8px;
-  border-radius: 8px;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px 0 0;
   animation: dsh-row-in 150ms var(--ds-ease-in-out);
 }
 
@@ -2042,25 +2232,21 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border: none;
   background: transparent;
-  padding: 3px 0;
+  padding: 0 0 0 20px;
   cursor: pointer;
   text-align: left;
+  height: 22px;
 }
 
 .gitBadge {
   flex: none;
-  width: 20px;
-  height: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
+  width: 16px;
+  text-align: center;
   font: var(--dsw-font-xxxs-strong-11);
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .gitName {
@@ -2069,8 +2255,45 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: var(--dsw-font-s-14);
+  font: var(--dsw-font-xxs-12);
   color: var(--dsw-alias-label-primary);
+}
+
+.gitRowActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 100ms;
+}
+
+.gitRow:hover .gitRowActions {
+  opacity: 1;
+}
+
+.gitRowAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.gitRowAction:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-active);
+  color: var(--dsw-alias-label-primary);
+}
+
+.gitRowAction:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .gitEmpty {
@@ -2283,6 +2506,7 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   white-space: pre-wrap;
 }
 
+/* ── Old commit section (replaced by gitCommitArea above, kept for compat) ── */
 .gitCommit {
   display: flex;
   gap: 6px;
@@ -2308,13 +2532,9 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   cursor: pointer;
 }
 
-.gitCommitButton:hover:not(:disabled) {
-  background: var(--dsw-alias-button-primary-hover);
-}
-
-.gitCommitButton:disabled {
-  opacity: 0.45;
-  cursor: default;
+.gitCommitInput:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* A history row: line 1 = hash + subject, line 2 = ref badges + author/date
@@ -2399,6 +2619,66 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
 .gitLogMore:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* The twistie (expand/collapse arrow) before a history row's hash. */
+.gitLogTwistie {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The expanded file list under a history row (tree structure). */
+.gitCommitFiles {
+  padding: 2px 0 4px 28px;
+  display: flex;
+  flex-direction: column;
+}
+
+.gitCommitFile {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px 0 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.gitCommitFile:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.gitCommitFileIcon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.gitCommitFilePath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-primary);
+}
+
+.gitCommitFileLoading {
+  padding: 4px 8px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.gitCommitFileEmpty {
+  padding: 4px 8px;
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* ── Intercepted produced-files row ────────────────────────────────────── */

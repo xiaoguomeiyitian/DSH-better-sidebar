@@ -44,6 +44,8 @@ export interface GitStatusResult {
   isRepo: boolean
   branch?: string
   entries: GitStatusEntry[]
+  /** Ahead/behind counts vs upstream; null when no upstream is configured. */
+  aheadBehind?: { ahead: number; behind: number } | null
 }
 
 /** One git log row. */
@@ -223,6 +225,15 @@ export const api = {
   /** Cherry-pick one commit onto the current branch. */
   gitCherryPick: (scope: SessionScope, hash: string) =>
     call<{ ok: true }>('git.cherry-pick', scopePayload(scope, { hash })),
+  /** Push the current branch to its upstream (sets up -u origin when none). */
+  gitPush: (scope: SessionScope) =>
+    call<{ ok: true }>('git.push', scopePayload(scope, {})),
+  /** Pull the current branch from its upstream (fetch + merge). */
+  gitPull: (scope: SessionScope) =>
+    call<{ ok: true }>('git.pull', scopePayload(scope, {})),
+  /** Fetch from the default remote without merging. */
+  gitFetch: (scope: SessionScope) =>
+    call<{ ok: true }>('git.fetch', scopePayload(scope, {})),
   /** Release a terminal's process immediately (tab closed; the WS close frame
    *  may be unreachable while the socket is down, so the host also accepts
    *  this explicit route). */

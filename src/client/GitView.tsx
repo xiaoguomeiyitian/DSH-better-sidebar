@@ -7,17 +7,29 @@
  * right-click context menu with advanced operations (open in editor, discard,
  * revert, cherry-pick, copy paths/hashes). Refresh is manual + on mount/
  * focus (no file watcher — KISS).
+ *
+ * The layout mirrors code-server's single-repository SCM view: the commit
+ * message input and Commit button sit at the TOP (above the file lists),
+ * followed by collapsible "Staged Changes" and "Changes" sections whose
+ * group headers carry a count badge and hover-revealed action buttons.
+ * File rows are 22px tall with hover-revealed stage/unstage/discard actions.
  */
-import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import {
   Button, IconBranchOutline16, IconCodeOutline16, IconCopyOutline16, IconRefreshOutline16,
-  IconTrashOutline16, Input, Menu, Modal, writeClipboard,
+  IconTrashOutline16, Menu, Modal, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { GitLogEntry, GitStatusEntry, GitStatusResult, SessionScope } from './api.ts'
 import { api } from './api.ts'
 import { relativeTo } from './paths.ts'
 import { relativeTime, t } from './locales.ts'
 import type { SidebarTab } from './state.ts'
+import { parseUnifiedDiff } from './DiffView.tsx'
+import {
+  IconAdd16, IconCheck16, IconChevronDown16, IconChevronRight16, IconDiffMultiple16,
+  IconDiscard16, IconGoToFile16, IconRemove16,
+  IconPush16, IconPull16, IconSync16,
+} from './icons.tsx'
 import css from './sidebar.module.css'
 
 /** The XY status letters a row badge shows (X = index, Y = worktree). */
@@ -55,6 +67,13 @@ function baseName(path: string): string {
   return at === -1 ? path : path.slice(at + 1)
 }
 
+/** Strip the `a/` / `b/` prefix git puts on diff paths (not on /dev/null). */
+function displayPath(path: string): string {
+  if (path === '/dev/null') return path
+  if (path.startsWith('a/') || path.startsWith('b/')) return path.slice(2)
+  return path
+}
+
 /** The ref names of one log row's decorations (`HEAD -> main` → `main`), deduped. */
 function refNames(refs: string): string[] {
   return [...new Set(
@@ -65,6 +84,78 @@ function refNames(refs: string): string[] {
       .map(ref => (ref.includes(' -> ') ? ref.slice(ref.indexOf(' -> ') + 4) : ref))
       .map(ref => (ref.startsWith('tag: ') ? ref.slice(5) : ref)),
   )]
+}
+
+/** One node in the file-path tree (a directory or a leaf file entry). */
+interface PathTreeNode {
+  /** The segment name (directory name or file base name). */
+  name: string
+  /** The full path from the repo root (for files) or the directory prefix (for dirs). */
+  path: string
+  /** Child directories and files (empty for leaf files). */
+  children: PathTreeNode[]
+  /** The git status entry (only for leaf files; undefined for directories). */
+  entry?: GitStatusEntry
+}
+
+/**
+ * Build a directory tree from a list of git status entries. Files in the
+ * root directory sit at the top level; nested files are grouped under
+ * directory nodes. Directories with a single child subdirectory are NOT
+ * collapsed (unlike VSCode's explorer) — the tree mirrors the real path
+ * structure so the user can navigate it.
+ */
+function buildPathTree(entries: GitStatusEntry[]): PathTreeNode[] {
+  const root: PathTreeNode = { name: '', path: '', children: [] }
+  for (const entry of entries) {
+    insertPathIntoTree(root, entry.path, entry)
+  }
+  sortPathTree(root)
+  return root.children
+}
+
+/**
+ * Build a directory tree from a list of plain path strings (used by the
+ * commit-history file list, which has no git status entries — just paths).
+ * Leaf nodes carry no `entry`; the tree structure is identical to
+ * {@link buildPathTree} so the two render with the same indentation.
+ */
+function buildPathTreeFromStrings(paths: string[]): PathTreeNode[] {
+  const root: PathTreeNode = { name: '', path: '', children: [] }
+  for (const path of paths) {
+    insertPathIntoTree(root, path, undefined)
+  }
+  sortPathTree(root)
+  return root.children
+}
+
+/** Insert one path (with an optional status entry) into the tree. */
+function insertPathIntoTree(root: PathTreeNode, path: string, entry: GitStatusEntry | undefined): void {
+  const parts = path.split('/')
+  let node = root
+  let prefix = ''
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!
+    prefix = prefix === '' ? part : `${prefix}/${part}`
+    const isLeaf = i === parts.length - 1
+    let child = node.children.find(c => c.name === part && (isLeaf ? c.entry !== undefined : c.entry === undefined))
+    if (child === undefined) {
+      child = { name: part, path: prefix, children: [], entry: isLeaf ? entry : undefined }
+      node.children.push(child)
+    }
+    node = child
+  }
+}
+
+/** Sort: directories first (alphabetical), then files (alphabetical). */
+function sortPathTree(root: PathTreeNode): void {
+  root.children.sort((a, b) => {
+    const aDir = a.entry === undefined
+    const bDir = b.entry === undefined
+    if (aDir !== bDir) return aDir ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+  for (const c of root.children) sortPathTree(c)
 }
 
 /** The pending destructive action (discard / revert / cherry-pick), gated by a confirm modal. */
@@ -104,6 +195,18 @@ export function GitView(props: {
   const [historyMenu, setHistoryMenu] = useState<{ entry: GitLogEntry; x: number; y: number } | null>(null)
   /** The pending destructive action awaiting confirmation. */
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
+  /** Collapsible section state (mirroring code-server's twistie behavior). */
+  const [stagedCollapsed, setStagedCollapsed] = useState(false)
+  const [changesCollapsed, setChangesCollapsed] = useState(false)
+  const [historyCollapsed, setHistoryCollapsed] = useState(false)
+  /** Collapsed directory nodes in the staged/changes trees (keyed by `s:`/`u:` + dir path). */
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set())
+  /** Expanded commits in the history tree (hashFull → true). */
+  const [expandedCommits, setExpandedCommits] = useState<Set<string>>(new Set())
+  /** Cached file lists per commit (hashFull → string[] of paths). */
+  const [commitFiles, setCommitFiles] = useState<Map<string, string[]>>(new Map())
+  /** Commits whose file list is currently loading. */
+  const [commitFilesLoading, setCommitFilesLoading] = useState<Set<string>>(new Set())
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -163,6 +266,48 @@ export function GitView(props: {
     })
   }
 
+  /** The diff tab for one file within a commit (tree-structured history).
+   *  The official diff-tab types only carry whole commits, so the file click
+   *  opens the commit's full patch (the same surface as the commit row). */
+  const openCommitFileDiff = (entry: GitLogEntry, _path: string): void => {
+    openCommitDiff(entry)
+  }
+
+  /** Toggle a commit's expansion in the history tree; on first expand,
+   *  fetch the commit's file list (cached per hashFull). */
+  const toggleCommitExpansion = async (entry: GitLogEntry): Promise<void> => {
+    const hashFull = entry.hashFull
+    const next = new Set(expandedCommits)
+    if (next.has(hashFull)) {
+      next.delete(hashFull)
+      setExpandedCommits(next)
+      return
+    }
+    next.add(hashFull)
+    setExpandedCommits(next)
+    // Load the file list if not cached.
+    if (commitFiles.has(hashFull)) return
+    if (commitFilesLoading.has(hashFull)) return
+    const loadingSet = new Set(commitFilesLoading)
+    loadingSet.add(hashFull)
+    setCommitFilesLoading(loadingSet)
+    try {
+      const result = await api.gitCommitDiff(scope, hashFull)
+      const parsed = parseUnifiedDiff(result.diff)
+      const paths = parsed.files.map(f => displayPath(f.newPath === '/dev/null' ? f.oldPath : f.newPath))
+      setCommitFiles(prev => { const m = new Map(prev); m.set(hashFull, paths); return m })
+    } catch {
+      // On error, collapse back so the user can retry.
+      const collapse = new Set(expandedCommits)
+      collapse.delete(hashFull)
+      setExpandedCommits(collapse)
+    } finally {
+      const done = new Set(commitFilesLoading)
+      done.delete(hashFull)
+      setCommitFilesLoading(done)
+    }
+  }
+
   const stageEntry = async (entry: GitStatusEntry, staged: boolean): Promise<void> => {
     setBusy(true)
     try {
@@ -179,6 +324,20 @@ export function GitView(props: {
     try {
       if (staged) await api.gitUnstage(scope)
       else await api.gitStage(scope)
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Stage or unstage an entire directory by its path prefix. git add -A --
+   *  <dir> and git reset -q -- <dir> both recurse into the directory, so a
+   *  single call handles every file under it. */
+  const stageDir = async (dirPath: string, staged: boolean): Promise<void> => {
+    setBusy(true)
+    try {
+      if (staged) await api.gitUnstage(scope, dirPath)
+      else await api.gitStage(scope, dirPath)
       await refresh()
     } finally {
       setBusy(false)
@@ -210,6 +369,51 @@ export function GitView(props: {
       await refresh()
     } catch (reason) {
       setCommitError(`${t('checkoutError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Push the current branch to its upstream (sets up -u origin when none). */
+  const push = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setCommitError(null)
+    try {
+      await api.gitPush(scope)
+      await refresh()
+    } catch (reason) {
+      setCommitError(`${t('pushError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Pull the current branch from its upstream (fetch + merge). */
+  const pull = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setCommitError(null)
+    try {
+      await api.gitPull(scope)
+      await refresh()
+    } catch (reason) {
+      setCommitError(`${t('pullError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Fetch from the default remote without merging. */
+  const fetch = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setCommitError(null)
+    try {
+      await api.gitFetch(scope)
+      await refresh()
+    } catch (reason) {
+      setCommitError(`${t('fetchError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
       setBusy(false)
     }
@@ -251,29 +455,216 @@ export function GitView(props: {
   const stagedEntries = (status?.entries ?? []).filter(isStagedEntry)
   const unstagedEntries = (status?.entries ?? []).filter(isUnstagedEntry)
 
-  const renderEntry = (entry: GitStatusEntry, staged: boolean): ReactNode => {
+  /** Toggle a directory's collapse state in the staged/changes trees. */
+  const toggleDir = (key: string): void => {
+    setCollapsedDirs(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  /** Render one tree node (a directory or a file row) recursively. */
+  const renderTreeNode = (node: PathTreeNode, staged: boolean, depth: number): ReactNode => {
+    const key = `${staged ? 's' : 'u'}:${node.path}`
+    if (node.entry !== undefined) {
+      // Leaf file row.
+      const entry = node.entry
+      return (
+        <div key={key} className={css.gitRow} style={{ paddingLeft: `${depth * 12}px` }}>
+          <button
+            type="button"
+            className={css.gitRowMain}
+            title={entry.path}
+            onClick={() => { openWorktreeDiff(entry, staged) }}
+            onContextMenu={(event) => { openFileMenu(event, entry, staged) }}
+          >
+            <span className={css.gitBadge}>{badgeOf(entry)}</span>
+            <span className={css.gitName}>{node.name}</span>
+          </button>
+          <div className={css.gitRowActions}>
+            {staged ? (
+              <button
+                type="button"
+                className={css.gitRowAction}
+                aria-label={t('unstage')}
+                title={t('unstage')}
+                disabled={busy}
+                onClick={() => { void stageEntry(entry, staged) }}
+              >
+                <IconRemove16 size={14} />
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className={css.gitRowAction}
+                  aria-label={t('openFile')}
+                  title={t('openFile')}
+                  onClick={() => { onOpenFile(entry.path) }}
+                >
+                  <IconGoToFile16 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={css.gitRowAction}
+                  aria-label={t('discard')}
+                  title={t('discard')}
+                  disabled={busy}
+                  onClick={() => {
+                    runConfirmed({
+                      title: t('discardTitle'),
+                      description: t('discardDesc', { path: entry.path }),
+                      confirmLabel: t('discard'),
+                      onConfirm: () => api.gitDiscard(scope, entry.path),
+                    })
+                  }}
+                >
+                  <IconDiscard16 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={css.gitRowAction}
+                  aria-label={t('stage')}
+                  title={t('stage')}
+                  disabled={busy}
+                  onClick={() => { void stageEntry(entry, staged) }}
+                >
+                  <IconAdd16 size={14} />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )
+    }
+    // Directory node.
+    const collapsed = collapsedDirs.has(key)
     return (
-      <div key={`${staged ? 's' : 'u'}:${entry.path}`} className={css.gitRow}>
-        <button
-          type="button"
-          className={css.gitRowMain}
-          title={entry.path}
-          onClick={() => { openWorktreeDiff(entry, staged) }}
-          onContextMenu={(event) => { openFileMenu(event, entry, staged) }}
+      <div key={key}>
+        <div
+          role="button"
+          tabIndex={0}
+          className={css.gitDirRow}
+          style={{ paddingLeft: `${depth * 12}px` }}
+          title={node.path}
+          onClick={() => { toggleDir(key) }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              toggleDir(key)
+            }
+          }}
         >
-          <span className={css.gitBadge}>{badgeOf(entry)}</span>
-          <span className={css.gitName}>{entry.path}</span>
-        </button>
-        <button
-          type="button"
-          className={css.iconButton}
-          aria-label={staged ? t('unstage') : t('stage')}
-          title={staged ? t('unstage') : t('stage')}
-          disabled={busy}
-          onClick={() => { void stageEntry(entry, staged) }}
-        >
-          {staged ? <IconTrashOutline16 /> : <IconBranchOutline16 />}
-        </button>
+          <span className={css.gitDirTwistie}>
+            {collapsed ? <IconChevronRight16 size={12} /> : <IconChevronDown16 size={12} />}
+          </span>
+          <span className={css.gitDirName}>{node.name}</span>
+          <div className={css.gitRowActions}>
+            {staged ? (
+              <button
+                type="button"
+                className={css.gitRowAction}
+                aria-label={t('unstage')}
+                title={t('unstage')}
+                disabled={busy}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void stageDir(node.path, staged)
+                }}
+              >
+                <IconRemove16 size={14} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={css.gitRowAction}
+                aria-label={t('stage')}
+                title={t('stage')}
+                disabled={busy}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void stageDir(node.path, staged)
+                }}
+              >
+                <IconAdd16 size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+        {!collapsed && node.children.map(child => renderTreeNode(child, staged, depth + 1))}
+      </div>
+    )
+  }
+
+  /** Render a tree of entries (staged or unstaged) with directory grouping. */
+  const renderTree = (entries: GitStatusEntry[], staged: boolean): ReactNode => {
+    const tree = buildPathTree(entries)
+    return tree.map(node => renderTreeNode(node, staged, 0))
+  }
+
+  /**
+   * Render a tree of commit-history file paths (no git status entries —
+   * just path strings). Shares the directory-row visuals with
+   * {@link renderTreeNode} but the leaf rows open a commit-file diff
+   * instead of a worktree diff. Directory collapse state is keyed by the
+   * commit hash + path so two commits' trees expand independently.
+   */
+  const renderCommitFileTree = (entry: GitLogEntry, paths: string[], depth: number): ReactNode => {
+    const tree = buildPathTreeFromStrings(paths)
+    return tree.map(node => renderCommitFileNode(entry, node, depth))
+  }
+
+  const renderCommitFileNode = (entry: GitLogEntry, node: PathTreeNode, depth: number): ReactNode => {
+    const key = `cf:${entry.hashFull}:${node.path}`
+    if (node.entry === undefined && node.children.length > 0) {
+      // Directory node.
+      const collapsed = collapsedDirs.has(key)
+      return (
+        <div key={key}>
+          <div
+            role="button"
+            tabIndex={0}
+            className={css.gitDirRow}
+            style={{ paddingLeft: `${depth * 12}px` }}
+            title={node.path}
+            onClick={() => { toggleDir(key) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                toggleDir(key)
+              }
+            }}
+          >
+            <span className={css.gitDirTwistie}>
+              {collapsed ? <IconChevronRight16 size={12} /> : <IconChevronDown16 size={12} />}
+            </span>
+            <span className={css.gitDirName}>{node.name}</span>
+          </div>
+          {!collapsed && node.children.map(child => renderCommitFileNode(entry, child, depth + 1))}
+        </div>
+      )
+    }
+    // Leaf file row.
+    return (
+      <div
+        key={key}
+        role="button"
+        tabIndex={0}
+        className={css.gitCommitFile}
+        style={{ paddingLeft: `${depth * 12}px` }}
+        title={node.path}
+        onClick={() => { openCommitFileDiff(entry, node.path) }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            openCommitFileDiff(entry, node.path)
+          }
+        }}
+      >
+        <span className={css.gitCommitFileIcon}><IconGoToFile16 size={12} /></span>
+        <span className={css.gitCommitFilePath}>{node.name}</span>
       </div>
     )
   }
@@ -309,92 +700,298 @@ export function GitView(props: {
 
       {status !== null && status.isRepo && (
         <>
-          <div className={css.gitSection}>
-            <div className={css.gitSectionHeader}>
-              <span>{t('staged')} ({stagedEntries.length})</span>
-              {stagedEntries.length > 0 && (
-                <button type="button" className={css.gitLink} disabled={busy} onClick={() => { void stageAll(true) }}>
-                  {t('unstageAll')}
-                </button>
-              )}
+          {/* ── Commit message input + Commit button (code-server style: at the TOP) ── */}
+          <div className={css.gitCommitArea}>
+            <div className={css.gitCommitInputRow}>
+              <input
+                className={css.gitCommitInput}
+                placeholder={t('commitPlaceholder', { branch: status.branch ?? '' })}
+                value={commitMsg}
+                disabled={busy}
+                onChange={(event) => { setCommitMsg(event.target.value); setCommitError(null) }}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void commit()
+                }}
+              />
             </div>
-            {stagedEntries.length === 0 && <div className={css.gitEmpty}>{t('noChanges')}</div>}
-            {stagedEntries.map(entry => renderEntry(entry, true))}
-          </div>
-          <div className={css.gitSection}>
-            <div className={css.gitSectionHeader}>
-              <span>{t('unstaged')} ({unstagedEntries.length})</span>
-              {unstagedEntries.length > 0 && (
-                <button type="button" className={css.gitLink} disabled={busy} onClick={() => { void stageAll(false) }}>
-                  {t('stageAll')}
-                </button>
-              )}
+            <div className={css.gitCommitButtonRow}>
+              <button
+                type="button"
+                className={css.gitCommitButton}
+                disabled={busy || commitMsg.trim() === '' || stagedEntries.length === 0}
+                onClick={() => { void commit() }}
+              >
+                <IconCheck16 size={14} />
+                <span>{t('commit')}</span>
+              </button>
             </div>
-            {unstagedEntries.length === 0 && <div className={css.gitEmpty}>{t('noChanges')}</div>}
-            {unstagedEntries.map(entry => renderEntry(entry, false))}
-          </div>
-
-          <div className={css.gitCommit}>
-            <Input
-              className={css.gitCommitInput}
-              placeholder={t('commitPlaceholder')}
-              value={commitMsg}
-              disabled={busy}
-              onChange={(event) => { setCommitMsg(event.target.value); setCommitError(null) }}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void commit()
-              }}
-            />
-            <button
-              type="button"
-              className={css.gitCommitButton}
-              disabled={busy || commitMsg.trim() === '' || stagedEntries.length === 0}
-              onClick={() => { void commit() }}
-            >
-              {t('commit')}
-            </button>
           </div>
           {commitError !== null && <div className={css.gitError}>{commitError}</div>}
 
+          {/* ── Staged Changes section (collapsible, with count badge) ── */}
           <div className={css.gitSection}>
-            <div className={css.gitSectionHeader}><span>{t('history')}</span></div>
-            {logEntries.map(entry => (
-              <div
-                key={entry.hashFull}
-                role="button"
-                tabIndex={0}
-                className={css.gitLogRow}
-                title={`${entry.author} · ${entry.date}\n${entry.hashFull}`}
-                onClick={() => { openCommitDiff(entry) }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    openCommitDiff(entry)
-                  }
-                }}
-                onContextMenu={(event) => { openHistoryMenu(event, entry) }}
-              >
-                <span className={css.gitLogLine1}>
-                  <span className={css.gitLogHash}>{entry.hash}</span>
-                  <span className={css.gitLogSubject}>{entry.subject}</span>
-                </span>
-                <span className={css.gitLogLine2}>
-                  {refNames(entry.refs).map(ref => (
-                    <span key={ref} className={css.gitLogRef}>{ref}</span>
-                  ))}
-                  <span className={css.gitLogMeta}>{entry.author} · {relativeTime(entry.date)}</span>
-                </span>
+            <div
+              className={css.gitSectionHeader}
+              onClick={() => { setStagedCollapsed(!stagedCollapsed) }}
+            >
+              <span className={css.gitTwistie}>
+                {stagedCollapsed ? <IconChevronRight16 size={14} /> : <IconChevronDown16 size={14} />}
+              </span>
+              <span className={css.gitSectionTitle}>{t('stagedChanges')}</span>
+              <span className={css.gitCountBadge}>{stagedEntries.length}</span>
+              <div className={css.gitSectionActions}>
+                {stagedEntries.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      className={css.gitSectionAction}
+                      aria-label={t('openStagedChanges')}
+                      title={t('openStagedChanges')}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        // Open diff for the first staged entry
+                        if (stagedEntries.length > 0) openWorktreeDiff(stagedEntries[0]!, true)
+                      }}
+                    >
+                      <IconDiffMultiple16 size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className={css.gitSectionAction}
+                      aria-label={t('unstageAllChanges')}
+                      title={t('unstageAllChanges')}
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void stageAll(true)
+                      }}
+                    >
+                      <IconRemove16 size={14} />
+                    </button>
+                  </>
+                )}
               </div>
-            ))}
-            {!logEnded && (
-              <button
-                type="button"
-                className={css.gitLogMore}
-                disabled={logLoadingMore || busy}
-                onClick={() => { void loadMoreLog() }}
-              >
-                {logLoadingMore ? t('loading') : t('loadMore')}
-              </button>
+            </div>
+            {!stagedCollapsed && stagedEntries.length === 0 && (
+              <div className={css.gitEmpty}>{t('noChanges')}</div>
+            )}
+            {!stagedCollapsed && renderTree(stagedEntries, true)}
+          </div>
+
+          {/* ── Changes section (collapsible, with count badge) ── */}
+          <div className={css.gitSection}>
+            <div
+              className={css.gitSectionHeader}
+              onClick={() => { setChangesCollapsed(!changesCollapsed) }}
+            >
+              <span className={css.gitTwistie}>
+                {changesCollapsed ? <IconChevronRight16 size={14} /> : <IconChevronDown16 size={14} />}
+              </span>
+              <span className={css.gitSectionTitle}>{t('unstagedChanges')}</span>
+              <span className={css.gitCountBadge}>{unstagedEntries.length}</span>
+              <div className={css.gitSectionActions}>
+                {unstagedEntries.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      className={css.gitSectionAction}
+                      aria-label={t('openChanges')}
+                      title={t('openChanges')}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        if (unstagedEntries.length > 0) openWorktreeDiff(unstagedEntries[0]!, false)
+                      }}
+                    >
+                      <IconDiffMultiple16 size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className={css.gitSectionAction}
+                      aria-label={t('discardAll')}
+                      title={t('discardAll')}
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        // Discard all unstaged changes one by one (the API
+                        // has no bulk discard; untracked files are skipped
+                        // because gitDiscard only touches tracked files).
+                        const tracked = unstagedEntries.filter(e => !isUntracked(e))
+                        if (tracked.length === 0) return
+                        runConfirmed({
+                          title: t('discardTitle'),
+                          description: t('discardDesc', { path: t('unstagedChanges') }),
+                          confirmLabel: t('discard'),
+                          onConfirm: async () => {
+                            for (const entry of tracked) {
+                              await api.gitDiscard(scope, entry.path)
+                            }
+                          },
+                        })
+                      }}
+                    >
+                      <IconDiscard16 size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className={css.gitSectionAction}
+                      aria-label={t('stageAllChanges')}
+                      title={t('stageAllChanges')}
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void stageAll(false)
+                      }}
+                    >
+                      <IconAdd16 size={14} />
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            {!changesCollapsed && unstagedEntries.length === 0 && (
+              <div className={css.gitEmpty}>{t('noChanges')}</div>
+            )}
+            {!changesCollapsed && renderTree(unstagedEntries, false)}
+          </div>
+
+          {/* ── History section (collapsible, pinned to the bottom so the
+                staged/changes area above gets the room). The header carries
+                the branch selector + sync/push/pull/refresh toolbar, matching
+                code-server's "图表操作" toolbar. ── */}
+          <div className={css.gitSectionHistory}>
+            <div
+              className={css.gitSectionHeader}
+              onClick={() => { setHistoryCollapsed(!historyCollapsed) }}
+            >
+              <span className={css.gitTwistie}>
+                {historyCollapsed ? <IconChevronRight16 size={14} /> : <IconChevronDown16 size={14} />}
+              </span>
+              <span className={css.gitSectionTitle}>{t('history')}</span>
+              <span className={css.gitCountBadge}>{logEntries.length}</span>
+              <div className={css.gitSectionActions} style={{ opacity: 1 }}>
+                <select
+                  className={css.gitBranchSelect}
+                  value={status?.branch ?? ''}
+                  onClick={(event) => { event.stopPropagation() }}
+                  onChange={(event) => { void checkout(event.target.value) }}
+                  disabled={busy || (status !== null && !status.isRepo)}
+                >
+                  {(status?.branch ?? '') !== '' && <option value={status!.branch}>{status!.branch}</option>}
+                  {branchNames.filter(name => name !== status?.branch).map(name => <option key={name} value={name}>{name}</option>)}
+                </select>
+                <button
+                  type="button"
+                  className={css.gitSectionAction}
+                  aria-label={t('fetch')}
+                  title={t('fetch')}
+                  disabled={busy}
+                  onClick={(event) => { event.stopPropagation(); void fetch() }}
+                >
+                  <IconSync16 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={css.gitSectionAction}
+                  aria-label={t('pull')}
+                  title={t('pull')}
+                  disabled={busy}
+                  onClick={(event) => { event.stopPropagation(); void pull() }}
+                >
+                  <IconPull16 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={css.gitSectionAction}
+                  aria-label={t('push')}
+                  title={t('push')}
+                  disabled={busy}
+                  onClick={(event) => { event.stopPropagation(); void push() }}
+                >
+                  <IconPush16 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={css.gitSectionAction}
+                  aria-label={t('refresh')}
+                  title={t('refresh')}
+                  disabled={busy}
+                  onClick={(event) => { event.stopPropagation(); void refresh() }}
+                >
+                  <IconRefreshOutline16 size={14} />
+                </button>
+              </div>
+            </div>
+            {/* Ahead/behind status indicator (between header and tree). */}
+            {status?.aheadBehind !== undefined && status.aheadBehind !== null && (status.aheadBehind.ahead > 0 || status.aheadBehind.behind > 0) && (
+              <div className={css.gitAheadBehind}>
+                {status.aheadBehind.ahead > 0 && status.aheadBehind.behind > 0
+                  ? t('aheadBehind', { ahead: status.aheadBehind.ahead, behind: status.aheadBehind.behind })
+                  : status.aheadBehind.ahead > 0
+                    ? t('ahead', { n: status.aheadBehind.ahead })
+                    : t('behind', { n: status.aheadBehind.behind })}
+              </div>
+            )}
+            {!historyCollapsed && (
+              <>
+                {logEntries.map(entry => {
+                  const expanded = expandedCommits.has(entry.hashFull)
+                  const files = commitFiles.get(entry.hashFull)
+                  const filesLoading = commitFilesLoading.has(entry.hashFull)
+                  return (
+                    <div key={entry.hashFull}>
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        className={css.gitLogRow}
+                        title={`${entry.author} · ${entry.date}\n${entry.hashFull}`}
+                        onClick={() => { void toggleCommitExpansion(entry) }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            void toggleCommitExpansion(entry)
+                          }
+                        }}
+                        onContextMenu={(event) => { openHistoryMenu(event, entry) }}
+                      >
+                        <span className={css.gitLogLine1}>
+                          <span className={css.gitLogTwistie}>
+                            {expanded ? <IconChevronDown16 size={12} /> : <IconChevronRight16 size={12} />}
+                          </span>
+                          <span className={css.gitLogHash}>{entry.hash}</span>
+                          <span className={css.gitLogSubject}>{entry.subject}</span>
+                        </span>
+                        <span className={css.gitLogLine2}>
+                          {refNames(entry.refs).map(ref => (
+                            <span key={ref} className={css.gitLogRef}>{ref}</span>
+                          ))}
+                          <span className={css.gitLogMeta}>{entry.author} · {relativeTime(entry.date)}</span>
+                        </span>
+                      </div>
+                      {expanded && (
+                        <div className={css.gitCommitFiles}>
+                          {filesLoading && files === undefined && (
+                            <div className={css.gitCommitFileLoading}>{t('loading')}</div>
+                          )}
+                          {files !== undefined && files.length === 0 && (
+                            <div className={css.gitCommitFileEmpty}>{t('noChanges')}</div>
+                          )}
+                          {files !== undefined && files.length > 0 && renderCommitFileTree(entry, files, 0)}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                {!logEnded && (
+                  <button
+                    type="button"
+                    className={css.gitLogMore}
+                    disabled={logLoadingMore || busy}
+                    onClick={() => { void loadMoreLog() }}
+                  >
+                    {logLoadingMore ? t('loading') : t('loadMore')}
+                  </button>
+                )}
+              </>
             )}
           </div>
 
